@@ -178,7 +178,7 @@ func (d *decodeState) unmarshal(v any) error {
 	d.scanWhile(scanSkipSpace)
 	// We decode rv not rv.Elem because the Unmarshaler interface
 	// test must be applied at the top level of the value.
-	err := d.value(rv)
+	err := d.value(rv, reflect.Value{})
 	if err != nil {
 		return d.addErrorContext(err)
 	}
@@ -354,14 +354,18 @@ Switch:
 // value consumes a JSON value from d.data[d.off-1:], decoding into v, and
 // reads the following byte ahead. If v is invalid, the value is discarded.
 // The first byte of the value has been read already.
-func (d *decodeState) value(v reflect.Value) error {
+func (d *decodeState) value(v reflect.Value, method reflect.Value) error {
+	if method.Kind() == reflect.Func {
+		v = reflect.New(v.Type()).Elem()
+	}
 	switch d.opcode {
 	default:
 		panic(phasePanicMsg)
 
 	case scanBeginArray:
+		//fmt.Println("scanBeginArray")
 		if v.IsValid() {
-			if err := d.array(v); err != nil {
+			if err := d.array(v, method); err != nil {
 				return err
 			}
 		} else {
@@ -370,8 +374,9 @@ func (d *decodeState) value(v reflect.Value) error {
 		d.scanNext()
 
 	case scanBeginObject:
+		//fmt.Println("scanBeginObject")
 		if v.IsValid() {
-			if err := d.object(v); err != nil {
+			if err := d.object(v, method); err != nil {
 				return err
 			}
 		} else {
@@ -380,6 +385,7 @@ func (d *decodeState) value(v reflect.Value) error {
 		d.scanNext()
 
 	case scanBeginLiteral:
+		//fmt.Println("scanBeginLiteral")
 		// All bytes inside literal return scanContinue op code.
 		start := d.readIndex()
 		d.rescanLiteral()
@@ -389,6 +395,9 @@ func (d *decodeState) value(v reflect.Value) error {
 				return err
 			}
 		}
+	}
+	if err := methodSet(v, method); err == nil {
+		return nil
 	}
 	return nil
 }
@@ -498,7 +507,7 @@ func indirect(v reflect.Value, decodingNull bool) (Unmarshaler, encoding.TextUnm
 
 // array consumes an array from d.data[d.off-1:], decoding into v.
 // The first byte of the array ('[') has been read already.
-func (d *decodeState) array(v reflect.Value) error {
+func (d *decodeState) array(v reflect.Value, method reflect.Value) error {
 	// Check for unmarshaler.
 	u, ut, pv := indirect(v, false)
 	if u != nil {
@@ -559,12 +568,12 @@ func (d *decodeState) array(v reflect.Value) error {
 
 		if i < v.Len() {
 			// Decode into element.
-			if err := d.value(v.Index(i)); err != nil {
+			if err := d.value(v.Index(i), reflect.Value{}); err != nil {
 				return err
 			}
 		} else {
 			// Ran out of fixed array: skip.
-			if err := d.value(reflect.Value{}); err != nil {
+			if err := d.value(reflect.Value{}, reflect.Value{}); err != nil {
 				return err
 			}
 		}
@@ -604,7 +613,7 @@ var textUnmarshalerType = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem(
 
 // object consumes an object from d.data[d.off-1:], decoding into v.
 // The first byte ('{') of the object has been read already.
-func (d *decodeState) object(v reflect.Value) error {
+func (d *decodeState) object(v reflect.Value, method reflect.Value) error {
 	// Check for unmarshaler.
 	u, ut, pv := indirect(v, false)
 	if u != nil {
@@ -662,6 +671,7 @@ func (d *decodeState) object(v reflect.Value) error {
 
 	var mapElem reflect.Value
 	var origErrorContext errorContext
+	var getMethod reflect.Method
 	if d.errorContext != nil {
 		origErrorContext = *d.errorContext
 	}
@@ -717,6 +727,7 @@ func (d *decodeState) object(v reflect.Value) error {
 			if f != nil {
 				subv = v
 				destring = f.quoted
+				getMethod = f.setMethod
 				for _, i := range f.index {
 					if subv.Kind() == reflect.Pointer {
 						if subv.IsNil() {
@@ -725,9 +736,10 @@ func (d *decodeState) object(v reflect.Value) error {
 							// since the field is unexported.
 							//
 							// See https://golang.org/issue/21357
+							//fmt.Println("Sub.Type", subv.Type())
 							if !subv.CanSet() {
 								d.saveError(fmt.Errorf("json: cannot set embedded pointer to unexported struct: %v", subv.Type().Elem()))
-								// Invalidate subv to ensure d.value(subv) skips over
+								//Invalidate subv to ensure d.value(subv) skips over
 								// the JSON value without assigning it to subv.
 								subv = reflect.Value{}
 								destring = false
@@ -772,7 +784,14 @@ func (d *decodeState) object(v reflect.Value) error {
 				d.saveError(fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal unquoted value into %v", subv.Type()))
 			}
 		} else {
-			if err := d.value(subv); err != nil {
+			var fn reflect.Value
+			if getMethod.Name != "" {
+				method := methodFuncValue(v, getMethod.Name)
+				if method.Kind() == reflect.Func {
+					fn = method
+				}
+			}
+			if err := d.value(subv, fn); err != nil {
 				return err
 			}
 		}

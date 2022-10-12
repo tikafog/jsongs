@@ -757,6 +757,12 @@ FieldLoop:
 			e.WriteString(f.nameNonEsc)
 		}
 		opts.quoted = f.quoted
+		if f.getMethod.Name != "" {
+			method := methodFuncValue(v, f.getMethod.Name)
+			if method.Kind() == reflect.Func {
+				fv = method
+			}
+		}
 		f.encoder(e, fv, opts)
 	}
 	if next == '{' {
@@ -1179,6 +1185,9 @@ type field struct {
 	nameNonEsc  string // `"` + name + `":`
 	nameEscHTML string // `"` + HTMLEscape(name) + `":`
 
+	getMethod reflect.Method
+	setMethod reflect.Method
+
 	tag       bool
 	index     []int
 	typ       reflect.Type
@@ -1251,9 +1260,30 @@ func typeFields(t reflect.Type) structFields {
 					}
 					// Do not ignore embedded fields of unexported struct types
 					// since they may have exported fields.
+				}
+				/* setter/getter remove
 				} else if !sf.IsExported() {
 					// Ignore unexported non-embedded fields.
 					continue
+				}
+				*/
+				var setMethod reflect.Method
+				var getMethod reflect.Method
+				var exist = false
+				if !sf.IsExported() {
+					stag := sf.Tag.Get("json-setter")
+					setMethod, exist = methodFuncMethod(t, methodName(t, sf.Name, stag, "Set"))
+					if !sf.Anonymous && !exist {
+						//fmt.Println("Skip Setter", "Type", t, "name", sf.Name, sf.Anonymous, "tag", stag, "setMethod", setMethod.Name, enc)
+						continue
+					}
+					gtag := sf.Tag.Get("json-getter")
+					getMethod, exist = methodFuncMethod(t, methodName(t, sf.Name, gtag, ""))
+					if !sf.Anonymous && !exist {
+						//debug.PrintStack()
+						//fmt.Println("Skip Getter", "Type", t, "name", sf.Name, sf.Anonymous, "tag", gtag, "getMethod", getMethod.Name, enc)
+						continue
+					}
 				}
 				tag := sf.Tag.Get("json")
 				if tag == "-" {
@@ -1294,6 +1324,8 @@ func typeFields(t reflect.Type) structFields {
 					}
 					field := field{
 						name:      name,
+						getMethod: getMethod,
+						setMethod: setMethod,
 						tag:       tagged,
 						index:     index,
 						typ:       ft,
@@ -1381,13 +1413,17 @@ func typeFields(t reflect.Type) structFields {
 
 	for i := range fields {
 		f := &fields[i]
-		f.encoder = typeEncoder(typeByIndex(t, f.index))
+		if f.getMethod.Name != "" {
+			f.encoder = newFuncEncoder(typeEncoder(typeByIndex(t, f.index)))
+		} else {
+			f.encoder = typeEncoder(typeByIndex(t, f.index))
+		}
 	}
 	nameIndex := make(map[string]int, len(fields))
 	for i, field := range fields {
 		nameIndex[field.name] = i
 	}
-	return structFields{fields, nameIndex}
+	return structFields{list: fields, nameIndex: nameIndex}
 }
 
 // dominantField looks through the fields, all of which are known to
@@ -1415,4 +1451,23 @@ func cachedTypeFields(t reflect.Type) structFields {
 	}
 	f, _ := fieldCache.LoadOrStore(t, typeFields(t))
 	return f.(structFields)
+}
+
+type funcEncoder struct {
+	elemEnc encoderFunc
+}
+
+func (pe funcEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+	if v.Kind() != reflect.Func {
+		pe.elemEnc(e, v, opts)
+		return
+	}
+	values := v.Call(nil)
+	pe.elemEnc(e, values[0], opts)
+}
+
+func newFuncEncoder(t encoderFunc) encoderFunc {
+	f := funcEncoder{elemEnc: t}.encode
+	return f
+
 }
