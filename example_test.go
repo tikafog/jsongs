@@ -439,3 +439,28 @@ func ExampleHTMLEscape() {
 	// Output:
 	//{"Name":"\u003cb\u003eHTML content\u003c/b\u003e"}
 }
+
+type Example struct {
+	name string `json:"name" json-getter:"MyName" json-setter:"SetMyName"`
+}
+
+func (receiver Example) MyName() string {
+	return receiver.name
+}
+
+func (receiver *Example) SetMyName(name string) {
+	receiver.name = name
+}
+
+func ExampleMainFunction() {
+	v, err := jsongs.Marshal(&Example{
+		name: "my name is jsongs",
+	})
+	if err != nil {
+		panic(err)
+	}
+	//dosomething
+	fmt.Println(string(v))
+	// Output:
+	//{"name":"my name is jsongs"}
+}
