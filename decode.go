@@ -671,7 +671,7 @@ func (d *decodeState) object(v reflect.Value, method reflect.Value) error {
 
 	var mapElem reflect.Value
 	var origErrorContext errorContext
-	var getMethod reflect.Method
+	var setter string
 	if d.errorContext != nil {
 		origErrorContext = *d.errorContext
 	}
@@ -727,7 +727,7 @@ func (d *decodeState) object(v reflect.Value, method reflect.Value) error {
 			if f != nil {
 				subv = v
 				destring = f.quoted
-				getMethod = f.setMethod
+				setter = f.setter
 				for _, i := range f.index {
 					if subv.Kind() == reflect.Pointer {
 						if subv.IsNil() {
@@ -784,14 +784,7 @@ func (d *decodeState) object(v reflect.Value, method reflect.Value) error {
 				d.saveError(fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal unquoted value into %v", subv.Type()))
 			}
 		} else {
-			var fn reflect.Value
-			if getMethod.Name != "" {
-				method := methodFuncValue(v, getMethod.Name)
-				if method.Kind() == reflect.Func {
-					fn = method
-				}
-			}
-			if err := d.value(subv, fn); err != nil {
+			if err := d.value(subv, methodFuncValue(reflect.Value{}, v, setter)); err != nil {
 				return err
 			}
 		}

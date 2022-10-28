@@ -374,11 +374,17 @@ func valueEncoder(v reflect.Value) encoderFunc {
 	if !v.IsValid() {
 		return invalidValueEncoder
 	}
-	return typeEncoder(v.Type())
+	return typeEncoder(v.Type(), false)
 }
 
-func typeEncoder(t reflect.Type) encoderFunc {
-	if fi, ok := encoderCache.Load(t); ok {
+type encoderKey struct {
+	t reflect.Type
+	m bool
+}
+
+func typeEncoder(t reflect.Type, m bool) encoderFunc {
+
+	if fi, ok := encoderCache.Load(encoderKey{t, m}); ok {
 		return fi.(encoderFunc)
 	}
 
@@ -391,7 +397,7 @@ func typeEncoder(t reflect.Type) encoderFunc {
 		f  encoderFunc
 	)
 	wg.Add(1)
-	fi, loaded := encoderCache.LoadOrStore(t, encoderFunc(func(e *encodeState, v reflect.Value, opts encOpts) {
+	fi, loaded := encoderCache.LoadOrStore(encoderKey{t, m}, encoderFunc(func(e *encodeState, v reflect.Value, opts encOpts) {
 		wg.Wait()
 		f(e, v, opts)
 	}))
@@ -400,9 +406,9 @@ func typeEncoder(t reflect.Type) encoderFunc {
 	}
 
 	// Compute the real encoder and replace the indirect func with it.
-	f = newTypeEncoder(t, true)
+	f = newTypeEncoder(t, m, true)
 	wg.Done()
-	encoderCache.Store(t, f)
+	encoderCache.Store(encoderKey{t, m}, f)
 	return f
 }
 
@@ -411,21 +417,29 @@ var (
 	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 )
 
+func newTypeEncoder(t reflect.Type, m bool, allowAddr bool) encoderFunc {
+	enc := newTypeValueEncoder(t, allowAddr)
+	if m {
+		enc = newFuncEncoder(enc)
+	}
+	return enc
+}
+
 // newTypeEncoder constructs an encoderFunc for a type.
 // The returned encoder only checks CanAddr when allowAddr is true.
-func newTypeEncoder(t reflect.Type, allowAddr bool) encoderFunc {
+func newTypeValueEncoder(t reflect.Type, allowAddr bool) encoderFunc {
 	// If we have a non-pointer value whose type implements
 	// Marshaler with a value receiver, then we're better off taking
 	// the address of the value - otherwise we end up with an
 	// allocation as we cast the value to an interface.
 	if t.Kind() != reflect.Pointer && allowAddr && reflect.PointerTo(t).Implements(marshalerType) {
-		return newCondAddrEncoder(addrMarshalerEncoder, newTypeEncoder(t, false))
+		return newCondAddrEncoder(addrMarshalerEncoder, newTypeEncoder(t, false, false))
 	}
 	if t.Implements(marshalerType) {
 		return marshalerEncoder
 	}
 	if t.Kind() != reflect.Pointer && allowAddr && reflect.PointerTo(t).Implements(textMarshalerType) {
-		return newCondAddrEncoder(addrTextMarshalerEncoder, newTypeEncoder(t, false))
+		return newCondAddrEncoder(addrTextMarshalerEncoder, newTypeEncoder(t, false, false))
 	}
 	if t.Implements(textMarshalerType) {
 		return textMarshalerEncoder
@@ -757,13 +771,8 @@ FieldLoop:
 			e.WriteString(f.nameNonEsc)
 		}
 		opts.quoted = f.quoted
-		if f.getMethod.Name != "" {
-			method := methodFuncValue(v, f.getMethod.Name)
-			if method.Kind() == reflect.Func {
-				fv = method
-			}
-		}
-		f.encoder(e, fv, opts)
+
+		f.encoder(e, methodFuncValue(fv, v, f.getter), opts)
 	}
 	if next == '{' {
 		e.WriteString("{}")
@@ -832,7 +841,7 @@ func newMapEncoder(t reflect.Type) encoderFunc {
 			return unsupportedTypeEncoder
 		}
 	}
-	me := mapEncoder{typeEncoder(t.Elem())}
+	me := mapEncoder{typeEncoder(t.Elem(), false)}
 	return me.encode
 }
 
@@ -924,7 +933,7 @@ func (ae arrayEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
 }
 
 func newArrayEncoder(t reflect.Type) encoderFunc {
-	enc := arrayEncoder{typeEncoder(t.Elem())}
+	enc := arrayEncoder{typeEncoder(t.Elem(), false)}
 	return enc.encode
 }
 
@@ -952,7 +961,7 @@ func (pe ptrEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
 }
 
 func newPtrEncoder(t reflect.Type) encoderFunc {
-	enc := ptrEncoder{typeEncoder(t.Elem())}
+	enc := ptrEncoder{typeEncoder(t.Elem(), false)}
 	return enc.encode
 }
 
@@ -1185,8 +1194,8 @@ type field struct {
 	nameNonEsc  string // `"` + name + `":`
 	nameEscHTML string // `"` + HTMLEscape(name) + `":`
 
-	getMethod reflect.Method
-	setMethod reflect.Method
+	getter string
+	setter string
 
 	tag       bool
 	index     []int
@@ -1267,21 +1276,12 @@ func typeFields(t reflect.Type) structFields {
 					continue
 				}
 				*/
-				var setMethod reflect.Method
-				var getMethod reflect.Method
-				var exist = false
+				var setter string
+				var getter string
 				if !sf.IsExported() {
-					stag := sf.Tag.Get("json-setter")
-					setMethod, exist = methodFuncMethod(t, methodName(t, sf.Name, stag, "Set"))
-					if !sf.Anonymous && !exist {
-						//fmt.Println("Skip Setter", "Type", t, "name", sf.Name, sf.Anonymous, "tag", stag, "setMethod", setMethod.Name, enc)
-						continue
-					}
-					gtag := sf.Tag.Get("json-getter")
-					getMethod, exist = methodFuncMethod(t, methodName(t, sf.Name, gtag, ""))
-					if !sf.Anonymous && !exist {
-						//debug.PrintStack()
-						//fmt.Println("Skip Getter", "Type", t, "name", sf.Name, sf.Anonymous, "tag", gtag, "getMethod", getMethod.Name, enc)
+					setter = methodFuncName(t, methodName(sf.Name, sf.Tag.Get("json-setter"), "Set"))
+					getter = methodFuncName(t, methodName(sf.Name, sf.Tag.Get("json-getter"), ""))
+					if !sf.Anonymous && (setter == "" || getter == "") {
 						continue
 					}
 				}
@@ -1324,8 +1324,8 @@ func typeFields(t reflect.Type) structFields {
 					}
 					field := field{
 						name:      name,
-						getMethod: getMethod,
-						setMethod: setMethod,
+						getter:    getter,
+						setter:    setter,
 						tag:       tagged,
 						index:     index,
 						typ:       ft,
@@ -1413,11 +1413,7 @@ func typeFields(t reflect.Type) structFields {
 
 	for i := range fields {
 		f := &fields[i]
-		if f.getMethod.Name != "" {
-			f.encoder = newFuncEncoder(typeEncoder(typeByIndex(t, f.index)))
-		} else {
-			f.encoder = typeEncoder(typeByIndex(t, f.index))
-		}
+		f.encoder = typeEncoder(typeByIndex(t, f.index), f.getter != "")
 	}
 	nameIndex := make(map[string]int, len(fields))
 	for i, field := range fields {
@@ -1469,5 +1465,4 @@ func (pe funcEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
 func newFuncEncoder(t encoderFunc) encoderFunc {
 	f := funcEncoder{elemEnc: t}.encode
 	return f
-
 }
