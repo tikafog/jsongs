@@ -1279,9 +1279,9 @@ func typeFields(t reflect.Type) structFields {
 				var setter string
 				var getter string
 				if !sf.IsExported() {
-					setter = methodFuncName(t, methodName(sf.Name, sf.Tag.Get("json-setter"), "Set"))
 					getter = methodFuncName(t, methodName(sf.Name, sf.Tag.Get("json-getter"), ""))
-					if !sf.Anonymous && (setter == "" || getter == "") {
+					setter = methodFuncName(t, methodName(sf.Name, sf.Tag.Get("json-setter"), "Set"))
+					if !sf.Anonymous && getter == "" {
 						continue
 					}
 				}
